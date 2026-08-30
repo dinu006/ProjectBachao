@@ -5,854 +5,454 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
-
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-
 import com.project.bachao.data.UserPreferences
 import com.project.bachao.network.ApiClient
-import com.project.bachao.network.RegisterRequest
 import com.project.bachao.service.EmergencyService
-
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
 
-    companion object {
-        private const val TAG = "BACHAO_MAIN"
-    }
-
-    private lateinit var userPreferences: UserPreferences
-
-    private var protectionStartRequested = false
-
-    /*
-     * Permission launcher
-     */
-    private val permissionLauncher =
-        registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
-        ) { permissions ->
-
-            Log.d(TAG, "Permission result: $permissions")
-
-            val locationGranted =
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED ||
-                        ContextCompat.checkSelfPermission(
-                            this,
-                            Manifest.permission.ACCESS_COARSE_LOCATION
-                        ) == PackageManager.PERMISSION_GRANTED
-
-            val notificationGranted =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    ContextCompat.checkSelfPermission(
-                        this,
-                        Manifest.permission.POST_NOTIFICATIONS
-                    ) == PackageManager.PERMISSION_GRANTED
-                } else {
-                    true
-                }
-
-            if (locationGranted && notificationGranted) {
-
-                Log.d(
-                    TAG,
-                    "Required permissions granted"
-                )
-
-                if (protectionStartRequested) {
-                    startProtectionService()
-                }
-
-            } else {
-
-                Log.e(
-                    TAG,
-                    "Required permissions were not granted"
-                )
-            }
-
-            protectionStartRequested = false
-        }
-
-
-    override fun onCreate(
-        savedInstanceState: Bundle?
-    ) {
-
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        userPreferences =
-            UserPreferences(this)
-
-        Log.d(
-            TAG,
-            "MainActivity started"
-        )
-
-        Log.d(
-            TAG,
-            "Stored user ID = ${userPreferences.getUserId()}"
-        )
-
-        Log.d(
-            TAG,
-            "Stored user name = ${userPreferences.getName()}"
-        )
-
-        Log.d(
-            TAG,
-            "Stored user phone = ${userPreferences.getPhone()}"
-        )
-
-        Log.d(
-            TAG,
-            "Stored user email = ${userPreferences.getEmail()}"
-        )
-
         setContent {
-
             MaterialTheme {
-
                 Surface(
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    color = Color(0xFF0F172A)
                 ) {
-
-                    BachaoScreen()
+                    AppNavigation()
                 }
             }
         }
     }
+}
 
+@Composable
+fun AppNavigation() {
+    val context = LocalContext.current
+    val userPreferences = remember { UserPreferences(context) }
 
-    @Composable
-    private fun BachaoScreen() {
+    // Check if user is already registered
+    var isUserLoggedIn by remember { mutableStateOf(userPreferences.isRegistered()) }
 
-        var name by remember {
-            mutableStateOf("")
+    if (isUserLoggedIn) {
+        MainProtectionScreen(
+            onLogout = {
+                userPreferences.clearUser()
+                isUserLoggedIn = false
+            }
+        )
+    } else {
+        RegisterScreen(
+            onRegistrationSuccess = {
+                isUserLoggedIn = true
+            }
+        )
+    }
+}
+
+@Composable
+fun MainProtectionScreen(onLogout: () -> Unit) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val userPreferences = remember { UserPreferences(context) }
+
+    val activeAlertId by userPreferences.activeAlertIdFlow.collectAsState()
+    var isCancelling by remember { mutableStateOf(false) }
+
+    val isAlertActive = activeAlertId != -1
+
+    // Theme Palette
+    val deepNavy = Color(0xFF0F172A)
+    val cardBackground = Color(0xFF1E293B)
+    val primaryAccent = Color(0xFF6366F1)
+    val secondaryAccent = Color(0xFF8B5CF6)
+    val safeGreen = Color(0xFF10B981)
+    val safeGreenDark = Color(0xFF059669)
+    val alertRed = Color(0xFFEF4444)
+    val alertRedDark = Color(0xFFDC2626)
+    val textPrimary = Color(0xFFF8FAFC)
+    val textSecondary = Color(0xFF94A3B8)
+
+    val permissionsToRequest = remember {
+        val list = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        list.toTypedArray()
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+
+        if (fineGranted || coarseGranted) {
+            val serviceIntent = Intent(context, EmergencyService::class.java)
+            ContextCompat.startForegroundService(context, serviceIntent)
+        } else {
+            Toast.makeText(context, "Location permissions are required for safety alerts.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Start protection service when user is logged in
+    LaunchedEffect(Unit) {
+        val allGranted = permissionsToRequest.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
 
-        var phone by remember {
-            mutableStateOf("")
+        if (allGranted) {
+            val serviceIntent = Intent(context, EmergencyService::class.java)
+            ContextCompat.startForegroundService(context, serviceIntent)
+        } else {
+            permissionLauncher.launch(permissionsToRequest)
         }
+    }
 
-        var email by remember {
-            mutableStateOf("")
-        }
-
-        var message by remember {
-            mutableStateOf("")
-        }
-
-        var loading by remember {
-            mutableStateOf(false)
-        }
-
-        var protectionActive by remember {
-            mutableStateOf(false)
-        }
-
-        val scope =
-            rememberCoroutineScope()
-
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(deepNavy)
+    ) {
+        // Dynamic decorative background glow based on alert status
+        Box(
+            modifier = Modifier
+                .size(280.dp)
+                .offset(x = (-60).dp, y = (-40).dp)
+                .clip(CircleShape)
+                .background(
+                    if (isAlertActive) alertRed.copy(alpha = 0.25f)
+                    else safeGreen.copy(alpha = 0.20f)
+                )
+                .blur(80.dp)
+        )
+        Box(
+            modifier = Modifier
+                .size(260.dp)
+                .align(Alignment.BottomEnd)
+                .offset(x = 60.dp, y = 60.dp)
+                .clip(CircleShape)
+                .background(
+                    if (isAlertActive) alertRedDark.copy(alpha = 0.20f)
+                    else primaryAccent.copy(alpha = 0.18f)
+                )
+                .blur(80.dp)
+        )
 
         Column(
-
-            modifier =
-                Modifier
-                    .fillMaxSize()
-                    .padding(24.dp),
-
-            verticalArrangement =
-                Arrangement.Center
-
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 36.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-
-            /*
-             * APP TITLE
-             */
-
-            Text(
-                text = "Bachao",
-
-                style =
-                    MaterialTheme
-                        .typography
-                        .headlineLarge
-            )
-
-            Spacer(
-                Modifier.height(8.dp)
-            )
-
-            Text(
-                text =
-                    "Women Safety Application"
-            )
-
-            Spacer(
-                Modifier.height(24.dp)
-            )
-
-
-            /*
-             * REGISTRATION SCREEN
-             */
-
-            if (!userPreferences.isRegistered()) {
-
-                /*
-                 * NAME
-                 */
-
-                OutlinedTextField(
-
-                    value = name,
-
-                    onValueChange = {
-                        name = it
-                    },
-
-                    label = {
-                        Text("Name")
-                    },
-
-                    modifier =
-                        Modifier.fillMaxWidth(),
-
-                    singleLine = true
-                )
-
-
-                Spacer(
-                    Modifier.height(12.dp)
-                )
-
-
-                /*
-                 * PHONE
-                 */
-
-                OutlinedTextField(
-
-                    value = phone,
-
-                    onValueChange = {
-                        phone = it
-                    },
-
-                    label = {
-                        Text("Phone")
-                    },
-
-                    modifier =
-                        Modifier.fillMaxWidth(),
-
-                    singleLine = true
-                )
-
-
-                Spacer(
-                    Modifier.height(12.dp)
-                )
-
-
-                /*
-                 * EMAIL
-                 */
-
-                OutlinedTextField(
-
-                    value = email,
-
-                    onValueChange = {
-                        email = it
-                    },
-
-                    label = {
-                        Text("Email")
-                    },
-
-                    modifier =
-                        Modifier.fillMaxWidth(),
-
-                    singleLine = true
-                )
-
-
-                Spacer(
-                    Modifier.height(20.dp)
-                )
-
-
-                /*
-                 * REGISTER BUTTON
-                 */
-
-                Button(
-
-                    enabled = !loading,
-
-                    onClick = {
-
-                        if (
-                            name.isBlank() ||
-                            phone.isBlank() ||
-                            email.isBlank()
+            // Main Card Container
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = cardBackground.copy(alpha = 0.90f)
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (isAlertActive) {
+                        // Alert Active State Icon
+                        Box(
+                            modifier = Modifier
+                                .size(88.dp)
+                                .clip(CircleShape)
+                                .background(alertRed.copy(alpha = 0.15f))
+                                .border(2.dp, alertRed.copy(alpha = 0.6f), CircleShape),
+                            contentAlignment = Alignment.Center
                         ) {
-
-                            message =
-                                "Please fill all fields."
-
-                            return@Button
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Emergency Alert",
+                                tint = alertRed,
+                                modifier = Modifier.size(46.dp)
+                            )
                         }
 
+                        Spacer(modifier = Modifier.height(20.dp))
 
-                        loading = true
+                        Text(
+                            text = "EMERGENCY ALERT ACTIVE",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = alertRed,
+                            letterSpacing = 0.5.sp,
+                            textAlign = TextAlign.Center
+                        )
 
-                        message = ""
+                        Spacer(modifier = Modifier.height(8.dp))
 
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = alertRed.copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = "Alert ID: #$activeAlertId",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = alertRed,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                            )
+                        }
 
-                        scope.launch {
+                        Spacer(modifier = Modifier.height(14.dp))
 
-                            try {
+                        Text(
+                            text = "Live emergency responders and your chosen contacts are notified.",
+                            fontSize = 13.sp,
+                            color = textSecondary,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 18.sp
+                        )
 
-                                Log.d(
-                                    TAG,
-                                    "Registering user..."
-                                )
+                        Spacer(modifier = Modifier.height(28.dp))
 
+                        Button(
+                            onClick = {
+                                isCancelling = true
 
-                                val response =
-                                    ApiClient
-                                        .api
-                                        .registerUser(
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    try {
+                                        val response = ApiClient.api.resolveAlert(activeAlertId)
 
-                                            RegisterRequest(
+                                        withContext(Dispatchers.Main) {
+                                            isCancelling = false
 
-                                                name =
-                                                    name.trim(),
+                                            if (response.isSuccessful && response.body()?.success == true) {
+                                                userPreferences.clearActiveAlertId()
 
-                                                phone =
-                                                    phone.trim(),
+                                                val resetIntent = Intent(context, EmergencyService::class.java).apply {
+                                                    action = EmergencyService.ACTION_RESET_EMERGENCY
+                                                }
+                                                context.startService(resetIntent)
 
-                                                email =
-                                                    email.trim()
-                                            )
-                                        )
-
-
-                                Log.d(
-                                    TAG,
-                                    "Registration HTTP code = ${response.code()}"
-                                )
-
-
-                                if (response.isSuccessful) {
-
-                                    val body =
-                                        response.body()
-
-
-                                    if (
-                                        body != null &&
-                                        body.success &&
-                                        body.user != null
-                                    ) {
-
-                                        /*
-                                         * SAVE USER
-                                         */
-
-                                        userPreferences.saveUser(
-
-                                            userId =
-                                                body.user.id,
-
-                                            name =
-                                                body.user.name,
-
-                                            phone =
-                                                body.user.phone,
-
-                                            email =
-                                                body.user.email
-                                        )
-
-
-                                        /*
-                                         * VERIFY STORAGE
-                                         */
-
-                                        Log.d(
-                                            TAG,
-                                            "================================"
-                                        )
-
-                                        Log.d(
-                                            TAG,
-                                            "USER SAVED SUCCESSFULLY"
-                                        )
-
-                                        Log.d(
-                                            TAG,
-                                            "User ID = ${userPreferences.getUserId()}"
-                                        )
-
-                                        Log.d(
-                                            TAG,
-                                            "Name = ${userPreferences.getName()}"
-                                        )
-
-                                        Log.d(
-                                            TAG,
-                                            "Phone = ${userPreferences.getPhone()}"
-                                        )
-
-                                        Log.d(
-                                            TAG,
-                                            "Email = ${userPreferences.getEmail()}"
-                                        )
-
-                                        Log.d(
-                                            TAG,
-                                            "================================"
-                                        )
-
-
-                                        message =
-                                            "Registration successful."
-
-                                    } else {
-
-                                        message =
-                                            body?.message
-                                                ?: "Registration failed."
+                                                Toast.makeText(
+                                                    context,
+                                                    "Alert successfully cancelled!",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            } else {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Failed to cancel: ${response.message()}",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            isCancelling = false
+                                            Toast.makeText(
+                                                context,
+                                                "Network error: ${e.localizedMessage ?: "Unable to connect"}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
                                     }
-
-                                } else {
-
-                                    val error =
-                                        response
-                                            .errorBody()
-                                            ?.string()
-
-                                    message =
-                                        error
-                                            ?: "HTTP ${response.code()}"
                                 }
-
-                            } catch (e: Exception) {
-
-                                Log.e(
-                                    TAG,
-                                    "Registration error",
-                                    e
+                            },
+                            enabled = !isCancelling,
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Transparent,
+                                disabledContainerColor = alertRedDark.copy(alpha = 0.5f)
+                            ),
+                            contentPadding = PaddingValues(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(54.dp)
+                                .background(
+                                    brush = Brush.horizontalGradient(listOf(alertRed, alertRedDark)),
+                                    shape = RoundedCornerShape(16.dp)
                                 )
-
-                                message =
-                                    "Connection error: ${e.message}"
-
-                            } finally {
-
-                                loading = false
+                        ) {
+                            if (isCancelling) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.5.dp,
+                                    modifier = Modifier.size(20.dp),
+                                    color = Color.White
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Cancelling Alert...",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                            } else {
+                                Text(
+                                    text = "Cancel Alert",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
                             }
                         }
-                    },
-
-                    modifier =
-                        Modifier.fillMaxWidth()
-
-                ) {
-
-                    Text(
-                        if (loading)
-                            "Registering..."
-                        else
-                            "Register"
-                    )
-                }
-
-
-            } else {
-
-
-                /*
-                 * USER SCREEN
-                 */
-
-                Text(
-
-                    text =
-                        "Welcome, ${userPreferences.getName()}",
-
-                    style =
-                        MaterialTheme
-                            .typography
-                            .titleLarge
-                )
-
-
-                Spacer(
-                    Modifier.height(12.dp)
-                )
-
-
-                Text(
-                    text =
-                        "Phone: ${userPreferences.getPhone()}"
-                )
-
-
-                Spacer(
-                    Modifier.height(8.dp)
-                )
-
-
-                Text(
-                    text =
-                        "Email: ${userPreferences.getEmail()}"
-                )
-
-
-                Spacer(
-                    Modifier.height(24.dp)
-                )
-
-
-                /*
-                 * PROTECTION BUTTON
-                 */
-
-                Button(
-
-                    onClick = {
-
-                        if (protectionActive) {
-
-                            /*
-                             * STOP
-                             */
-
-                            Log.d(
-                                TAG,
-                                "Stopping protection"
+                    } else {
+                        // Protected / Normal State Icon
+                        Box(
+                            modifier = Modifier
+                                .size(88.dp)
+                                .clip(CircleShape)
+                                .background(safeGreen.copy(alpha = 0.15f))
+                                .border(2.dp, safeGreen.copy(alpha = 0.6f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Active Protection",
+                                tint = safeGreen,
+                                modifier = Modifier.size(46.dp)
                             )
-
-                            stopProtectionService()
-
-                            protectionActive =
-                                false
-
-                            message =
-                                "Protection stopped."
-
-                        } else {
-
-                            /*
-                             * START
-                             */
-
-                            Log.d(
-                                TAG,
-                                "Starting protection request"
-                            )
-
-                            protectionStartRequested =
-                                true
-
-                            requestPermissionsAndStart()
                         }
-                    },
 
-                    modifier =
-                        Modifier.fillMaxWidth()
+                        Spacer(modifier = Modifier.height(20.dp))
 
-                ) {
+                        Text(
+                            text = "Bachao Protection Active",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = textPrimary,
+                            textAlign = TextAlign.Center
+                        )
 
-                    Text(
+                        Spacer(modifier = Modifier.height(8.dp))
 
-                        if (protectionActive)
+                        // User profile pill
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFF334155).copy(alpha = 0.6f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = "User",
+                                    tint = primaryAccent,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = userPreferences.getName().ifEmpty { "Protected User" },
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = textPrimary
+                                )
+                            }
+                        }
 
-                            "STOP PROTECTION"
+                        Spacer(modifier = Modifier.height(14.dp))
 
-                        else
+                        Text(
+                            text = "Shake your phone vigorously in case of an emergency to trigger an instant alert.",
+                            fontSize = 13.sp,
+                            color = textSecondary,
+                            textAlign = TextAlign.Center,
+                            lineHeight = 18.sp
+                        )
 
-                            "ACTIVATE PROTECTION"
-                    )
+                        Spacer(modifier = Modifier.height(28.dp))
+
+                        // Modern Outlined Logout Button
+                        OutlinedButton(
+                            onClick = {
+                                val stopServiceIntent = Intent(context, EmergencyService::class.java)
+                                context.stopService(stopServiceIntent)
+                                onLogout()
+                            },
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = textSecondary
+                            ),
+                            border = ButtonDefaults.outlinedButtonBorder.copy(
+                                brush = Brush.horizontalGradient(
+                                    listOf(Color(0xFF475569), Color(0xFF334155))
+                                )
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ExitToApp,
+                                contentDescription = "Logout",
+                                modifier = Modifier.size(18.dp),
+                                tint = textSecondary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Logout & Stop Protection",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
 
+            Spacer(modifier = Modifier.height(24.dp))
 
-            Spacer(
-                Modifier.height(20.dp)
-            )
-
-
-            /*
-             * STATUS MESSAGE
-             */
-
-            if (message.isNotBlank()) {
-
-                Text(
-                    text = message
-                )
-            }
-        }
-    }
-
-
-    /*
-     * REQUEST REQUIRED PERMISSIONS
-     */
-
-    private fun requestPermissionsAndStart() {
-
-        val permissions =
-            mutableListOf<String>()
-
-
-        /*
-         * FINE LOCATION
-         */
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-
-            permissions.add(
-                Manifest.permission.ACCESS_FINE_LOCATION
+            // Footer note
+            Text(
+                text = "Secured by Bachao Safety System",
+                fontSize = 12.sp,
+                color = textSecondary.copy(alpha = 0.7f),
+                fontWeight = FontWeight.Normal
             )
         }
-
-
-        /*
-         * COARSE LOCATION
-         */
-
-        if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-
-            permissions.add(
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            )
-        }
-
-
-        /*
-         * ANDROID 13+ NOTIFICATION
-         */
-
-        if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.TIRAMISU
-        ) {
-
-            if (
-                ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-
-                permissions.add(
-                    Manifest.permission.POST_NOTIFICATIONS
-                )
-            }
-        }
-
-
-        /*
-         * ALL PERMISSIONS ALREADY GRANTED
-         */
-
-        if (permissions.isEmpty()) {
-
-            Log.d(
-                TAG,
-                "All permissions already granted"
-            )
-
-            startProtectionService()
-
-        } else {
-
-            Log.d(
-                TAG,
-                "Requesting permissions: $permissions"
-            )
-
-            permissionLauncher.launch(
-                permissions.toTypedArray()
-            )
-        }
-    }
-
-
-    /*
-     * START EMERGENCY SERVICE
-     */
-
-    private fun startProtectionService() {
-
-        /*
-         * VERY IMPORTANT:
-         * Verify user exists before starting service.
-         */
-
-        val userId =
-            userPreferences.getUserId()
-
-
-        if (userId == -1) {
-
-            Log.e(
-                TAG,
-                "Cannot start protection: no user ID"
-            )
-
-            return
-        }
-
-
-        Log.d(
-            TAG,
-            "================================"
-        )
-
-        Log.d(
-            TAG,
-            "STARTING EMERGENCY SERVICE"
-        )
-
-        Log.d(
-            TAG,
-            "User ID = $userId"
-        )
-
-        Log.d(
-            TAG,
-            "User name = ${userPreferences.getName()}"
-        )
-
-        Log.d(
-            TAG,
-            "User phone = ${userPreferences.getPhone()}"
-        )
-
-        Log.d(
-            TAG,
-            "User email = ${userPreferences.getEmail()}"
-        )
-
-        Log.d(
-            TAG,
-            "================================"
-        )
-
-
-        val intent =
-            Intent(
-                this,
-                EmergencyService::class.java
-            )
-
-
-        try {
-
-            ContextCompat.startForegroundService(
-                this,
-                intent
-            )
-
-            Log.d(
-                TAG,
-                "Foreground service start requested"
-            )
-
-        } catch (e: Exception) {
-
-            Log.e(
-                TAG,
-                "Failed to start EmergencyService",
-                e
-            )
-
-            return
-        }
-    }
-
-
-    /*
-     * STOP EMERGENCY SERVICE
-     */
-
-    private fun stopProtectionService() {
-
-        Log.d(
-            TAG,
-            "Stopping EmergencyService"
-        )
-
-
-        val intent =
-            Intent(
-                this,
-                EmergencyService::class.java
-            )
-
-
-        stopService(intent)
-    }
-
-
-    override fun onDestroy() {
-
-        Log.d(
-            TAG,
-            "MainActivity destroyed"
-        )
-
-        super.onDestroy()
     }
 }

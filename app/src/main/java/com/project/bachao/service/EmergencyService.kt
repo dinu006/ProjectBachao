@@ -29,664 +29,234 @@ import com.google.android.gms.location.Priority
 
 import com.project.bachao.MainActivity
 import com.project.bachao.R
+import com.project.bachao.data.UserPreferences
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 import java.net.HttpURLConnection
 import java.net.URL
 
-
 class EmergencyService : Service() {
 
     companion object {
+        const val ACTION_RESET_EMERGENCY = "com.project.bachao.ACTION_RESET_EMERGENCY"
 
         private const val TAG = "BACHAO_SERVICE"
+        private const val CHANNEL_ID = "bachao_protection"
+        private const val NOTIFICATION_ID = 1001
 
-        private const val CHANNEL_ID =
-            "bachao_protection"
-
-        private const val NOTIFICATION_ID =
-            1001
-
-        /*
-         * IMPORTANT:
-         *
-         * This must be your PC's IPv4 address.
-         *
-         * Example:
-         *
-         * http://192.168.31.200:3000
-         *
-         * Do NOT use localhost.
-         */
-        private const val SERVER_URL =
-            "http://192.168.31.200:3000"
-
-        private const val ALERT_ENDPOINT =
-            "$SERVER_URL/api/alerts"
+        private const val SERVER_URL = "http://192.168.31.200:3000"
+        private const val ALERT_ENDPOINT = "$SERVER_URL/api/alerts"
     }
 
-
-    /*
-     * Coroutine scope for network operations.
-     */
     private val serviceScope =
         CoroutineScope(
-            SupervisorJob() +
-                    Dispatchers.IO
+            SupervisorJob() + Dispatchers.IO
         )
 
-
-    /*
-     * Sensors
-     */
     private lateinit var sensorManager: SensorManager
-
     private lateinit var shakeDetector: ShakeDetector
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
-
-    /*
-     * Location
-     */
-    private lateinit var fusedLocationClient:
-            FusedLocationProviderClient
-
-
-    /*
-     * Prevent duplicate requests.
-     */
     @Volatile
     private var alertInProgress = false
 
-
-    /*
-     * Prevent multiple active emergencies.
-     */
     @Volatile
     private var emergencyActive = false
 
-
     override fun onCreate() {
-
         super.onCreate()
 
-        Log.d(
-            TAG,
-            "================================"
-        )
+        Log.d(TAG, "================================")
+        Log.d(TAG, "EmergencyService CREATED")
+        Log.d(TAG, "================================")
 
-        Log.d(
-            TAG,
-            "EmergencyService CREATED"
-        )
-
-        Log.d(
-            TAG,
-            "================================"
-        )
-
-
-        /*
-         * Notification channel.
-         */
         createNotificationChannel()
 
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-        /*
-         * Sensor manager.
-         */
-        sensorManager =
-            getSystemService(
-                Context.SENSOR_SERVICE
-            ) as SensorManager
-
-
-        /*
-         * Fused Location Provider.
-         *
-         * This is the important change.
-         */
-        fusedLocationClient =
-            LocationServices
-                .getFusedLocationProviderClient(
-                    this
-                )
-
-
-        /*
-         * Shake detector.
-         */
-        shakeDetector =
-            ShakeDetector(
-                sensorManager
-            ) {
-
-                Log.d(
-                    TAG,
-                    "SHAKE CALLBACK RECEIVED"
-                )
-
-                handleShake()
-            }
+        shakeDetector = ShakeDetector(sensorManager) {
+            Log.d(TAG, "SHAKE CALLBACK RECEIVED")
+            handleShake()
+        }
     }
-
 
     override fun onStartCommand(
         intent: Intent?,
         flags: Int,
         startId: Int
     ): Int {
+        if (intent?.action == ACTION_RESET_EMERGENCY) {
+            Log.d(TAG, "Received ACTION_RESET_EMERGENCY")
+            resetEmergencyState()
+            return START_STICKY
+        }
 
-        Log.d(
-            TAG,
-            "EmergencyService STARTED"
-        )
-
-
-        /*
-         * Start foreground notification.
-         */
+        Log.d(TAG, "EmergencyService STARTED")
         startProtectionNotification()
-
-
-        /*
-         * Start shake detector.
-         */
         shakeDetector.start()
 
-
-        /*
-         * If Android kills the service,
-         * request it to recreate it.
-         */
         return START_STICKY
     }
 
-
-    /*
-     * ========================================
-     * SHAKE HANDLER
-     * ========================================
-     */
-
     private fun handleShake() {
+        Log.d(TAG, "================================")
+        Log.d(TAG, "HANDLE SHAKE")
+        Log.d(TAG, "alertInProgress=$alertInProgress")
+        Log.d(TAG, "emergencyActive=$emergencyActive")
+        Log.d(TAG, "================================")
 
-        Log.d(
-            TAG,
-            "================================"
-        )
-
-        Log.d(
-            TAG,
-            "HANDLE SHAKE"
-        )
-
-        Log.d(
-            TAG,
-            "alertInProgress=$alertInProgress"
-        )
-
-        Log.d(
-            TAG,
-            "emergencyActive=$emergencyActive"
-        )
-
-        Log.d(
-            TAG,
-            "================================"
-        )
-
-
-        /*
-         * Don't send another request while
-         * an alert is already being processed.
-         */
         if (alertInProgress) {
-
-            Log.d(
-                TAG,
-                "Alert request already in progress"
-            )
-
+            Log.d(TAG, "Alert request already in progress")
             return
         }
 
-
-        /*
-         * Don't create duplicate alerts.
-         */
         if (emergencyActive) {
-
-            Log.d(
-                TAG,
-                "Emergency already active"
-            )
-
+            Log.d(TAG, "Emergency already active")
             return
         }
 
-
-        /*
-         * Lock immediately.
-         */
         alertInProgress = true
 
+        val preferences = UserPreferences(this)
+        val userId = preferences.getUserId()
+        val name = preferences.getName()
+        val phone = preferences.getPhone()
+        val email = preferences.getEmail()
 
-        /*
-         * ====================================
-         * READ USER DATA
-         * ====================================
-         *
-         * These keys must match the keys used
-         * when MainActivity saves the user.
-         */
-        val preferences =
-            getSharedPreferences(
-                "bachao_prefs",
-                Context.MODE_PRIVATE
-            )
+        Log.d(TAG, "User ID=$userId")
+        Log.d(TAG, "User name=$name")
+        Log.d(TAG, "User phone=$phone")
+        Log.d(TAG, "User email=$email")
 
-
-        val userId =
-            preferences.getInt(
-                "user_id",
-                -1
-            )
-
-
-        val name =
-            preferences.getString(
-                "user_name",
-                ""
-            ) ?: ""
-
-
-        val phone =
-            preferences.getString(
-                "user_phone",
-                ""
-            ) ?: ""
-
-
-        val email =
-            preferences.getString(
-                "user_email",
-                ""
-            ) ?: ""
-
-
-        Log.d(
-            TAG,
-            "User ID=$userId"
-        )
-
-        Log.d(
-            TAG,
-            "User name=$name"
-        )
-
-        Log.d(
-            TAG,
-            "User phone=$phone"
-        )
-
-        Log.d(
-            TAG,
-            "User email=$email"
-        )
-
-
-        /*
-         * User doesn't exist locally.
-         */
         if (userId == -1) {
-
-            Log.e(
-                TAG,
-                "NO USER ID FOUND"
-            )
-
+            Log.e(TAG, "NO USER ID FOUND")
             alertInProgress = false
-
             return
         }
 
-
-        /*
-         * ====================================
-         * GET FRESH LOCATION
-         * ====================================
-         */
         getCurrentLocation(
-
             onSuccess = { location ->
+                Log.d(TAG, "================================")
+                Log.d(TAG, "LOCATION RECEIVED")
+                Log.d(TAG, "Latitude=${location.latitude}")
+                Log.d(TAG, "Longitude=${location.longitude}")
+                Log.d(TAG, "Accuracy=${location.accuracy}")
+                Log.d(TAG, "================================")
 
-                Log.d(
-                    TAG,
-                    "================================"
-                )
-
-                Log.d(
-                    TAG,
-                    "LOCATION RECEIVED"
-                )
-
-                Log.d(
-                    TAG,
-                    "Latitude=${location.latitude}"
-                )
-
-                Log.d(
-                    TAG,
-                    "Longitude=${location.longitude}"
-                )
-
-                Log.d(
-                    TAG,
-                    "Accuracy=${location.accuracy}"
-                )
-
-                Log.d(
-                    TAG,
-                    "================================"
-                )
-
-
-                /*
-                 * Send network request on
-                 * background thread.
-                 */
                 serviceScope.launch {
-
                     sendEmergencyAlert(
-
-                        userId =
-                            userId,
-
-                        name =
-                            name,
-
-                        phone =
-                            phone,
-
-                        email =
-                            email,
-
-                        latitude =
-                            location.latitude,
-
-                        longitude =
-                            location.longitude,
-
-                        accuracy =
-                            location.accuracy
+                        userId = userId,
+                        name = name,
+                        phone = phone,
+                        email = email,
+                        latitude = location.latitude,
+                        longitude = location.longitude,
+                        accuracy = location.accuracy
                     )
                 }
             },
-
             onFailure = {
-
-                Log.e(
-                    TAG,
-                    "Could not get current location"
-                )
-
-                /*
-                 * Allow another shake attempt.
-                 */
+                Log.e(TAG, "Could not get current location")
                 alertInProgress = false
             }
         )
     }
 
-
-    /*
-     * ========================================
-     * GET CURRENT LOCATION
-     * ========================================
-     *
-     * IMPORTANT:
-     *
-     * We do NOT use:
-     *
-     * getLastKnownLocation()
-     *
-     * because it can return null.
-     *
-     * Instead we request a fresh location.
-     */
-
     private fun getCurrentLocation(
         onSuccess: (Location) -> Unit,
         onFailure: () -> Unit
     ) {
-
-        /*
-         * Check permission.
-         */
         if (
             ActivityCompat.checkSelfPermission(
                 this,
                 Manifest.permission.ACCESS_FINE_LOCATION
             ) != PackageManager.PERMISSION_GRANTED &&
-
             ActivityCompat.checkSelfPermission(
                 this,
                 Manifest.permission.ACCESS_COARSE_LOCATION
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-
-            Log.e(
-                TAG,
-                "Location permission not granted"
-            )
-
+            Log.e(TAG, "Location permission not granted")
             onFailure()
-
             return
         }
 
+        Log.d(TAG, "Requesting fresh location...")
 
-        Log.d(
-            TAG,
-            "Requesting fresh location..."
-        )
-
-
-        /*
-         * Determine accuracy.
-         */
         val priority =
-
             if (
                 ActivityCompat.checkSelfPermission(
                     this,
                     Manifest.permission.ACCESS_FINE_LOCATION
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-
                 Priority.PRIORITY_HIGH_ACCURACY
-
             } else {
-
                 Priority.PRIORITY_BALANCED_POWER_ACCURACY
             }
 
-
-        /*
-         * First try getCurrentLocation().
-         *
-         * Unlike lastLocation, this asks Google
-         * Play Services for a current location.
-         */
         fusedLocationClient
-            .getCurrentLocation(
-                priority,
-                null
-            )
+            .getCurrentLocation(priority, null)
             .addOnSuccessListener { location ->
-
                 if (location != null) {
-
-                    Log.d(
-                        TAG,
-                        "Fresh location received"
-                    )
-
+                    Log.d(TAG, "Fresh location received")
                     onSuccess(location)
-
                 } else {
-
-                    Log.w(
-                        TAG,
-                        "getCurrentLocation returned NULL"
-                    )
-
-                    /*
-                     * Try active location updates.
-                     */
-                    requestActiveLocation(
-                        priority,
-                        onSuccess,
-                        onFailure
-                    )
+                    Log.w(TAG, "getCurrentLocation returned NULL")
+                    requestActiveLocation(priority, onSuccess, onFailure)
                 }
             }
             .addOnFailureListener { exception ->
-
-                Log.e(
-                    TAG,
-                    "getCurrentLocation failed",
-                    exception
-                )
-
-                /*
-                 * Try active location updates.
-                 */
-                requestActiveLocation(
-                    priority,
-                    onSuccess,
-                    onFailure
-                )
+                Log.e(TAG, "getCurrentLocation failed", exception)
+                requestActiveLocation(priority, onSuccess, onFailure)
             }
     }
-
-
-    /*
-     * ========================================
-     * ACTIVE LOCATION FALLBACK
-     * ========================================
-     */
 
     private fun requestActiveLocation(
         priority: Int,
         onSuccess: (Location) -> Unit,
         onFailure: () -> Unit
     ) {
+        Log.d(TAG, "Starting active location updates...")
 
-        Log.d(
-            TAG,
-            "Starting active location updates..."
-        )
-
-
-        /*
-         * Request location every second.
-         */
         val locationRequest =
-            LocationRequest.Builder(
-                priority,
-                1000L
-            )
-                .setMinUpdateIntervalMillis(
-                    500L
-                )
-                .setMaxUpdateDelayMillis(
-                    2000L
-                )
-                .setWaitForAccurateLocation(
-                    false
-                )
-                .setMaxUpdates(
-                    1
-                )
+            LocationRequest.Builder(priority, 1000L)
+                .setMinUpdateIntervalMillis(500L)
+                .setMaxUpdateDelayMillis(2000L)
+                .setWaitForAccurateLocation(false)
+                .setMaxUpdates(1)
                 .build()
 
-
-        var callbackCalled =
-            false
-
+        var callbackCalled = false
 
         val locationCallback =
             object : LocationCallback() {
+                override fun onLocationResult(result: LocationResult) {
+                    if (callbackCalled) return
+                    callbackCalled = true
 
-                override fun onLocationResult(
-                    result: LocationResult
-                ) {
-
-                    if (callbackCalled) {
-                        return
-                    }
-
-
-                    callbackCalled =
-                        true
-
-
-                    val location =
-                        result.lastLocation
-
-
-                    /*
-                     * Stop requesting more locations.
-                     */
-                    fusedLocationClient
-                        .removeLocationUpdates(
-                            this
-                        )
-
+                    val location = result.lastLocation
+                    fusedLocationClient.removeLocationUpdates(this)
 
                     if (location != null) {
-
-                        Log.d(
-                            TAG,
-                            "Active location received"
-                        )
-
-                        Log.d(
-                            TAG,
-                            "Latitude=${location.latitude}"
-                        )
-
-                        Log.d(
-                            TAG,
-                            "Longitude=${location.longitude}"
-                        )
-
-                        Log.d(
-                            TAG,
-                            "Accuracy=${location.accuracy}"
-                        )
-
-
+                        Log.d(TAG, "Active location received")
+                        Log.d(TAG, "Latitude=${location.latitude}")
+                        Log.d(TAG, "Longitude=${location.longitude}")
+                        Log.d(TAG, "Accuracy=${location.accuracy}")
                         onSuccess(location)
-
                     } else {
-
-                        Log.e(
-                            TAG,
-                            "LocationResult has no location"
-                        )
-
+                        Log.e(TAG, "LocationResult has no location")
                         onFailure()
                     }
                 }
             }
-
 
         fusedLocationClient
             .requestLocationUpdates(
@@ -695,33 +265,12 @@ class EmergencyService : Service() {
                 Looper.getMainLooper()
             )
             .addOnFailureListener { exception ->
-
-                if (callbackCalled) {
-                    return@addOnFailureListener
-                }
-
-
-                callbackCalled =
-                    true
-
-
-                Log.e(
-                    TAG,
-                    "requestLocationUpdates failed",
-                    exception
-                )
-
-
+                if (callbackCalled) return@addOnFailureListener
+                callbackCalled = true
+                Log.e(TAG, "requestLocationUpdates failed", exception)
                 onFailure()
             }
     }
-
-
-    /*
-     * ========================================
-     * SEND ALERT TO NODE.JS
-     * ========================================
-     */
 
     private fun sendEmergencyAlert(
         userId: Int,
@@ -732,93 +281,23 @@ class EmergencyService : Service() {
         longitude: Double,
         accuracy: Float
     ) {
-
-        var connection:
-                HttpURLConnection? = null
-
+        var connection: HttpURLConnection? = null
 
         try {
+            Log.d(TAG, "================================")
+            Log.d(TAG, "SENDING EMERGENCY ALERT")
+            Log.d(TAG, "URL=$ALERT_ENDPOINT")
+            Log.d(TAG, "================================")
 
-            Log.d(
-                TAG,
-                "================================"
-            )
+            val url = URL(ALERT_ENDPOINT)
+            connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Accept", "application/json")
 
-            Log.d(
-                TAG,
-                "SENDING EMERGENCY ALERT"
-            )
-
-            Log.d(
-                TAG,
-                "URL=$ALERT_ENDPOINT"
-            )
-
-            Log.d(
-                TAG,
-                "================================"
-            )
-
-
-            /*
-             * Create URL.
-             */
-            val url =
-                URL(ALERT_ENDPOINT)
-
-
-            /*
-             * Open HTTP connection.
-             */
-            connection =
-                url.openConnection()
-                        as HttpURLConnection
-
-
-            /*
-             * POST.
-             */
-            connection.requestMethod =
-                "POST"
-
-
-            /*
-             * Timeouts.
-             */
-            connection.connectTimeout =
-                10000
-
-            connection.readTimeout =
-                10000
-
-
-            /*
-             * We are sending data.
-             */
-            connection.doOutput =
-                true
-
-
-            /*
-             * JSON content.
-             */
-            connection.setRequestProperty(
-                "Content-Type",
-                "application/json"
-            )
-
-
-            connection.setRequestProperty(
-                "Accept",
-                "application/json"
-            )
-
-
-            /*
-             * =================================
-             * JSON
-             * =================================
-             */
             val json =
                 """
                 {
@@ -833,391 +312,138 @@ class EmergencyService : Service() {
                 }
                 """.trimIndent()
 
+            Log.d(TAG, "Request JSON=$json")
 
-            Log.d(
-                TAG,
-                "Request JSON=$json"
-            )
+            connection.outputStream.use { output ->
+                output.write(json.toByteArray(Charsets.UTF_8))
+                output.flush()
+            }
 
+            val responseCode = connection.responseCode
+            Log.d(TAG, "Server response code=$responseCode")
 
-            /*
-             * Send JSON.
-             */
-            connection
-                .outputStream
-                .use { output ->
-
-                    output.write(
-                        json.toByteArray(
-                            Charsets.UTF_8
-                        )
-                    )
-
-                    output.flush()
-                }
-
-
-            /*
-             * Get HTTP response.
-             */
-            val responseCode =
-                connection.responseCode
-
-
-            Log.d(
-                TAG,
-                "Server response code=$responseCode"
-            )
-
-
-            /*
-             * Read server response.
-             */
             val responseText =
-
                 try {
-
-                    if (
-                        responseCode in
-                        200..299
-                    ) {
-
-                        connection
-                            .inputStream
-                            .bufferedReader()
-                            .use {
-                                it.readText()
-                            }
-
+                    if (responseCode in 200..299) {
+                        connection.inputStream.bufferedReader().use { it.readText() }
                     } else {
-
-                        connection
-                            .errorStream
-                            ?.bufferedReader()
-                            ?.use {
-                                it.readText()
-                            }
-                            ?: ""
+                        connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                     }
-
-                } catch (
-                    e: Exception
-                ) {
-
-                    Log.e(
-                        TAG,
-                        "Could not read server response",
-                        e
-                    )
-
+                } catch (e: Exception) {
+                    Log.e(TAG, "Could not read server response", e)
                     ""
                 }
 
+            Log.d(TAG, "Server response=$responseText")
 
-            Log.d(
-                TAG,
-                "Server response=$responseText"
-            )
+            if (responseCode in 200..299) {
+                emergencyActive = true
+                alertInProgress = false
 
+                try {
+                    val jsonResponse = JSONObject(responseText)
+                    if (jsonResponse.has("alert")) {
+                        val alertObj = jsonResponse.getJSONObject("alert")
+                        val alertId = alertObj.getInt("id")
+                        val preferences = UserPreferences(this)
+                        preferences.saveActiveAlertId(alertId)
+                        Log.d(TAG, "Active alert ID saved: $alertId")
+                    }
+                } catch (jsonErr: Exception) {
+                    Log.e(TAG, "Failed to parse alert ID from server response", jsonErr)
+                }
 
-            /*
-             * =================================
-             * SUCCESS
-             * =================================
-             */
-            if (
-                responseCode in
-                200..299
-            ) {
-
-                emergencyActive =
-                    true
-
-                alertInProgress =
-                    false
-
-
-                Log.d(
-                    TAG,
-                    "================================"
-                )
-
-                Log.d(
-                    TAG,
-                    "EMERGENCY ALERT SENT SUCCESSFULLY"
-                )
-
-                Log.d(
-                    TAG,
-                    "================================"
-                )
-
+                Log.d(TAG, "================================")
+                Log.d(TAG, "EMERGENCY ALERT SENT SUCCESSFULLY")
+                Log.d(TAG, "================================")
             } else {
-
-                Log.e(
-                    TAG,
-                    "SERVER REJECTED ALERT"
-                )
-
-
-                /*
-                 * Allow another attempt.
-                 */
-                alertInProgress =
-                    false
+                Log.e(TAG, "SERVER REJECTED ALERT")
+                alertInProgress = false
             }
-
-
         } catch (e: Exception) {
-
-            Log.e(
-                TAG,
-                "FAILED TO SEND EMERGENCY ALERT",
-                e
-            )
-
-
-            /*
-             * Allow another attempt.
-             */
-            alertInProgress =
-                false
-
+            Log.e(TAG, "FAILED TO SEND EMERGENCY ALERT", e)
+            alertInProgress = false
         } finally {
-
             connection?.disconnect()
         }
     }
 
-
-    /*
-     * ========================================
-     * ESCAPE JSON
-     * ========================================
-     */
-
-    private fun escapeJson(
-        value: String
-    ): String {
-
+    private fun escapeJson(value: String): String {
         return value
-            .replace(
-                "\\",
-                "\\\\"
-            )
-            .replace(
-                "\"",
-                "\\\""
-            )
-            .replace(
-                "\n",
-                "\\n"
-            )
-            .replace(
-                "\r",
-                "\\r"
-            )
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
     }
-
-
-    /*
-     * ========================================
-     * FOREGROUND NOTIFICATION
-     * ========================================
-     */
 
     private fun startProtectionNotification() {
+        val notification = createNotification()
 
-        val notification =
-            createNotification()
-
-
-        if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.Q
-        ) {
-
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceCompat.startForeground(
-
                 this,
-
                 NOTIFICATION_ID,
-
                 notification,
-
-                android.content.pm.ServiceInfo
-                    .FOREGROUND_SERVICE_TYPE_LOCATION
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
             )
-
         } else {
-
-            startForeground(
-                NOTIFICATION_ID,
-                notification
-            )
+            startForeground(NOTIFICATION_ID, notification)
         }
 
-
-        Log.d(
-            TAG,
-            "Foreground service started successfully"
-        )
+        Log.d(TAG, "Foreground service started successfully")
     }
 
-
-    /*
-     * ========================================
-     * CREATE NOTIFICATION
-     * ========================================
-     */
-
-    private fun createNotification():
-            Notification {
-
-        val intent =
-            Intent(
-                this,
-                MainActivity::class.java
-            )
-
+    private fun createNotification(): Notification {
+        val intent = Intent(this, MainActivity::class.java)
 
         val pendingIntent =
             PendingIntent.getActivity(
-
                 this,
-
                 0,
-
                 intent,
-
-                PendingIntent.FLAG_UPDATE_CURRENT or
-                        PendingIntent.FLAG_IMMUTABLE
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-
-        return NotificationCompat
-            .Builder(
-                this,
-                CHANNEL_ID
-            )
-            .setContentTitle(
-                "Bachao Protection Active"
-            )
-            .setContentText(
-                "Shake your phone to send an emergency alert"
-            )
-            .setSmallIcon(
-                R.drawable.ic_launcher_foreground
-            )
-            .setContentIntent(
-                pendingIntent
-            )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Bachao Protection Active")
+            .setContentText("Shake your phone to send an emergency alert")
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .setPriority(
-                NotificationCompat.PRIORITY_HIGH
-            )
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
     }
 
-
-    /*
-     * ========================================
-     * NOTIFICATION CHANNEL
-     * ========================================
-     */
-
     private fun createNotificationChannel() {
-
-        if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.O
-        ) {
-
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel =
                 NotificationChannel(
-
                     CHANNEL_ID,
-
                     "Bachao Protection",
-
-                    NotificationManager
-                        .IMPORTANCE_LOW
+                    NotificationManager.IMPORTANCE_LOW
                 )
 
+            channel.description = "Bachao emergency protection service"
 
-            channel.description =
-                "Bachao emergency protection service"
-
-
-            val manager =
-                getSystemService(
-                    NotificationManager::class.java
-                )
-
-
-            manager.createNotificationChannel(
-                channel
-            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
         }
     }
 
-
-    /*
-     * ========================================
-     * RESET EMERGENCY
-     * ========================================
-     */
-
     fun resetEmergencyState() {
-
-        emergencyActive =
-            false
-
-        alertInProgress =
-            false
-
-
-        Log.d(
-            TAG,
-            "Emergency state reset"
-        )
+        emergencyActive = false
+        alertInProgress = false
+        Log.d(TAG, "Emergency state reset")
     }
 
-
-    /*
-     * ========================================
-     * SERVICE DESTROYED
-     * ========================================
-     */
-
     override fun onDestroy() {
-
-        Log.d(
-            TAG,
-            "EmergencyService DESTROYED"
-        )
-
-
-        /*
-         * Stop shake detector.
-         */
+        Log.d(TAG, "EmergencyService DESTROYED")
         shakeDetector.stop()
-
-
-        /*
-         * Cancel coroutines.
-         */
         serviceScope.cancel()
-
-
         super.onDestroy()
     }
 
-
-    override fun onBind(
-        intent: Intent?
-    ): IBinder? {
-
+    override fun onBind(intent: Intent?): IBinder? {
         return null
     }
 }
